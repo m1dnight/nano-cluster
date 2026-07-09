@@ -1,0 +1,613 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>nano cluster overview</title>
+<!--
+  The cluster overview - a single self-contained page that runs in your
+  browser, NOT on the nodes. Open it from disk (just overview), give it
+  the IP of any node, and it walks outward from there: every node's
+  GET /api/network response names its peers, whose names carry their IPs
+  (nano@10.0.0.8), so one seed discovers the whole mesh. Each node is
+  then polled for its cluster view and its queue occupancy every 2s.
+  The nodes' API allows any origin (CORS), which is what lets a page
+  served from a laptop read the boards' replies.
+-->
+<style>
+  :root {
+    --page: #f9f9f7;
+    --surface: #fcfcfb;
+    --ink: #0b0b0b;
+    --ink-2: #52514e;
+    --muted: #898781;
+    --hairline: rgba(11, 11, 11, 0.10);
+    --good: #0ca30c;
+    --warning: #fab219;
+    --critical: #d03b3b;
+    --accent: #2a78d6;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --page: #0d0d0d;
+      --surface: #1a1a19;
+      --ink: #ffffff;
+      --ink-2: #c3c2b7;
+      --muted: #898781;
+      --hairline: rgba(255, 255, 255, 0.10);
+      --accent: #3987e5;
+    }
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--page);
+    color: var(--ink);
+    font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  main { max-width: 980px; margin: 0 auto; padding: 0 20px 40px; }
+
+  header {
+    max-width: 980px;
+    margin: 0 auto;
+    padding: 24px 20px 8px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    align-items: baseline;
+    justify-content: space-between;
+  }
+  h1 { font-size: 20px; font-weight: 650; margin: 0; }
+  h1 span { color: var(--muted); font-weight: 400; }
+
+  #seed-form { display: flex; gap: 8px; }
+  #seed {
+    width: 190px;
+    padding: 6px 10px;
+    border: 1px solid var(--hairline);
+    border-radius: 8px;
+    background: var(--surface);
+    color: var(--ink);
+    font: inherit;
+  }
+  #seed-form button {
+    padding: 6px 14px;
+    border: none;
+    border-radius: 8px;
+    background: var(--accent);
+    color: #fff;
+    font: inherit;
+    font-weight: 550;
+    cursor: pointer;
+  }
+
+  #hint { color: var(--ink-2); margin: 24px 2px; }
+
+  /* --- summary tiles ------------------------------------------------ */
+  #tiles {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 12px;
+    margin: 16px 0 24px;
+  }
+  .tile {
+    background: var(--surface);
+    border: 1px solid var(--hairline);
+    border-radius: 10px;
+    padding: 12px 14px;
+  }
+  .tile .label { color: var(--ink-2); font-size: 13px; }
+  .tile .value { font-size: 26px; font-weight: 600; margin-top: 2px; }
+  .tile .value.small { font-size: 17px; word-break: break-all; }
+  .tile .note { font-size: 12px; margin-top: 2px; color: var(--ink-2); }
+
+  /* --- submit forms --------------------------------------------------- */
+  .section-title {
+    font-size: 12px;
+    font-weight: 650;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin: 0 0 10px;
+  }
+  #submit-wrap { margin-bottom: 24px; }
+  #submit {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 12px;
+  }
+  .task .desc { margin: 8px 0 12px; font-size: 13px; color: var(--ink-2); }
+  .task .fields { display: flex; flex-direction: column; gap: 8px; }
+  .field {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    font-size: 13px;
+  }
+  .field .name { color: var(--muted); }
+  .field input {
+    width: 62%;
+    padding: 5px 9px;
+    border: 1px solid var(--hairline);
+    border-radius: 8px;
+    background: var(--page);
+    color: var(--ink);
+    font: inherit;
+    font-size: 13px;
+  }
+  .task .actions { display: flex; align-items: center; gap: 10px; margin-top: 14px; }
+  .task button {
+    padding: 6px 14px;
+    border: none;
+    border-radius: 8px;
+    background: var(--accent);
+    color: #fff;
+    font: inherit;
+    font-weight: 550;
+    cursor: pointer;
+  }
+  .task .result { font-size: 13px; }
+
+  /* --- jobs ----------------------------------------------------------- */
+  #jobs-wrap { margin-bottom: 24px; }
+  #jobs {
+    background: var(--surface);
+    border: 1px solid var(--hairline);
+    border-radius: 10px;
+    padding: 6px 16px;
+  }
+  .job-row {
+    display: grid;
+    grid-template-columns: minmax(120px, max-content) max-content max-content 1fr;
+    gap: 14px;
+    align-items: baseline;
+    padding: 7px 0;
+    font-size: 13px;
+    border-top: 1px solid var(--hairline);
+  }
+  .job-row:first-child { border-top: none; }
+  .job-row .muted { color: var(--muted); }
+  .job-summary { word-break: break-word; color: var(--ink-2); }
+
+  /* --- node cards ---------------------------------------------------- */
+  #cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 12px;
+  }
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--hairline);
+    border-radius: 10px;
+    padding: 14px 16px;
+  }
+  .card.gone .body { opacity: 0.55; }
+  .card h2 {
+    font-size: 15px;
+    font-weight: 650;
+    margin: 0;
+    word-break: break-all;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    justify-content: space-between;
+  }
+  .badge {
+    font-size: 11px;
+    font-weight: 650;
+    letter-spacing: 0.03em;
+    color: var(--accent);
+    border: 1px solid currentcolor;
+    border-radius: 999px;
+    padding: 1px 8px;
+    white-space: nowrap;
+  }
+  .chip { font-size: 13px; color: var(--ink-2); white-space: nowrap; }
+  .dot { font-size: 11px; }
+  .dot.good { color: var(--good); }
+  .dot.warning { color: var(--warning); }
+  .dot.critical { color: var(--critical); }
+
+  .card .rows { margin-top: 10px; font-size: 13px; }
+  .row { display: flex; justify-content: space-between; gap: 12px; padding: 3px 0; }
+  .row .k { color: var(--muted); white-space: nowrap; }
+  .row .v { text-align: right; word-break: break-all; }
+  .row .v .warn { color: var(--ink-2); }
+  .peers { border-top: 1px solid var(--hairline); margin-top: 8px; padding-top: 6px; }
+
+  footer {
+    max-width: 980px;
+    margin: 0 auto;
+    padding: 0 20px 32px;
+    color: var(--muted);
+    font-size: 12px;
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>nano cluster <span>overview</span></h1>
+  <form id="seed-form">
+    <input id="seed" placeholder="seed IP, e.g. 10.0.0.7" autocomplete="off" spellcheck="false">
+    <button>watch</button>
+  </form>
+</header>
+<main>
+  <p id="hint">Enter the IP of any node. The page asks it for its cluster view,
+    then follows the peer names (<code>nano@&lt;ip&gt;</code>) to discover and
+    poll every other node.</p>
+  <section id="tiles" hidden></section>
+  <section id="submit-wrap" hidden>
+    <h2 class="section-title">submit work</h2>
+    <div id="submit"></div>
+  </section>
+  <section id="jobs-wrap" hidden>
+    <h2 class="section-title">jobs</h2>
+    <div id="jobs"></div>
+  </section>
+  <section id="cards"></section>
+</main>
+<footer id="foot"></footer>
+
+<script>
+'use strict';
+
+const POLL_MS = 2000;
+const FETCH_TIMEOUT_MS = 1500;
+// a node whose leader is unreachable stalls ~2s per push before replying
+const SUBMIT_TIMEOUT_MS = 6000;
+
+// target -> {target, name, view, queue, jobs, ok, everSeen}
+// A target is what we fetch from: "10.0.0.8", or "localhost:8123" for a
+// host-run node. `view`, `queue` and `jobs` keep the last good answer so
+// a node that drops off is shown as it was, greyed, not erased.
+const nodes = new Map();
+let seed = null;
+
+// "nano@10.0.0.8" -> "10.0.0.8"; anything without an IPv4 host part
+// (nonode@nohost) is not fetchable and yields null.
+function targetOf(name) {
+  const at = typeof name === 'string' ? name.indexOf('@') : -1;
+  if (at < 0) return null;
+  const host = name.slice(at + 1);
+  return /^\d{1,3}(\.\d{1,3}){3}$/.test(host) ? host : null;
+}
+
+function nodeEntry(target) {
+  let entry = nodes.get(target);
+  if (!entry) {
+    entry = { target, name: null, view: null, queue: null, jobs: null, ok: false, everSeen: false };
+    nodes.set(target, entry);
+  }
+  return entry;
+}
+
+async function getJson(target, path) {
+  const control = new AbortController();
+  const timer = setTimeout(() => control.abort(), FETCH_TIMEOUT_MS);
+  try {
+    const response = await fetch(`http://${target}${path}`, { signal: control.signal });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return await response.json();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function pollNode(entry) {
+  try {
+    const [view, queue] = await Promise.all([
+      getJson(entry.target, '/api/network'),
+      getJson(entry.target, '/api/work/queue'),
+    ]);
+    Object.assign(entry, { view, queue, name: view.node, ok: true, everSeen: true });
+    for (const peer of Object.keys(view.peers || {})) {
+      const target = targetOf(peer);
+      if (target) nodeEntry(target);
+    }
+  } catch (_err) {
+    entry.ok = false;
+    return;
+  }
+  // separate, so a node running firmware without the endpoint still renders
+  try {
+    entry.jobs = (await getJson(entry.target, '/api/work/jobs')).jobs || [];
+  } catch (_err) { /* keep the last good list */ }
+}
+
+async function poll() {
+  if (document.hidden || !seed) return;
+  nodeEntry(seed);
+  await Promise.all([...nodes.values()].map(pollNode));
+  render();
+  fetchCatalog();
+}
+
+// ---- submitting work ------------------------------------------------
+// The catalog of submittable tasks comes from the nodes themselves
+// (GET /api/work/items): every task's parameters with prefill defaults.
+// The forms render once, so edits and focus survive the polling.
+
+let catalog = null;
+
+async function fetchCatalog() {
+  if (catalog) return;
+  for (const node of [...nodes.values()].filter(n => n.ok)) {
+    try {
+      const reply = await getJson(node.target, '/api/work/items');
+      catalog = reply.work_items || [];
+      renderSubmit();
+      return;
+    } catch (_err) { /* try the next node, or the next poll */ }
+  }
+}
+
+function renderSubmit() {
+  document.getElementById('submit-wrap').hidden = false;
+  document.getElementById('submit').innerHTML = catalog.map((item, index) => `
+    <form class="card task" data-index="${index}">
+      <h2><span>${escapeHtml(item.label)}</span></h2>
+      <p class="desc">${escapeHtml(item.description)}</p>
+      <div class="fields">
+        ${item.parameters.map(p => `<label class="field">
+          <span class="name">${escapeHtml(p.name)}</span>
+          <input name="${escapeHtml(p.name)}" value="${escapeHtml(p.default)}"
+                 ${p.type === 'integer' ? 'inputmode="numeric"' : ''} autocomplete="off">
+        </label>`).join('')}
+      </div>
+      <div class="actions">
+        <button>queue on leader</button>
+        <span class="result" role="status"></span>
+      </div>
+    </form>`).join('');
+  for (const form of document.querySelectorAll('#submit form.task')) {
+    form.addEventListener('submit', submitTask);
+  }
+}
+
+// Post to the leader if we can reach it (where the queue lives), else to
+// any online node - every node forwards to the leader's queue anyway.
+function submitTarget() {
+  const online = [...nodes.values()].filter(n => n.ok);
+  const leader = online.find(n => n.name === consensus().leader);
+  return (leader || online[0] || {}).target || null;
+}
+
+async function postJson(target, path, payload) {
+  const control = new AbortController();
+  const timer = setTimeout(() => control.abort(), SUBMIT_TIMEOUT_MS);
+  try {
+    const response = await fetch(`http://${target}${path}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+      signal: control.signal,
+    });
+    const reply = await response.json();
+    if (!response.ok) throw new Error(reply.error || `HTTP ${response.status}`);
+    return reply;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function submitTask(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const item = catalog[Number(form.dataset.index)];
+  const result = form.querySelector('.result');
+
+  const args = [];
+  for (const parameter of item.parameters) {
+    const raw = form.elements[parameter.name].value.trim();
+    if (parameter.type === 'integer') {
+      const n = Number(raw);
+      if (!Number.isInteger(n)) {
+        result.innerHTML = chip('warning', `${parameter.name} must be a whole number`);
+        return;
+      }
+      args.push(n);
+    } else {
+      args.push(raw);
+    }
+  }
+
+  const target = submitTarget();
+  if (!target) {
+    result.innerHTML = chip('critical', 'no reachable node');
+    return;
+  }
+
+  result.textContent = 'queueing…';
+  try {
+    const reply = await postJson(target, '/api/work', {
+      work_item: item.work_item, arguments: args,
+    });
+    const chunks = Number(reply.chunks);
+    result.innerHTML = chip('good', `job #${reply.job} · ${chunks} chunk${chunks === 1 ? '' : 's'}`);
+  } catch (err) {
+    result.innerHTML = chip('critical', err.message || 'failed');
+  }
+}
+
+// The leader most reachable nodes agree on; split views get a warning.
+function consensus() {
+  const votes = new Map();
+  for (const n of nodes.values()) {
+    if (n.ok && n.view) votes.set(n.view.leader, (votes.get(n.view.leader) || 0) + 1);
+  }
+  let leader = null;
+  let best = 0;
+  for (const [name, count] of votes) {
+    if (count > best) { leader = name; best = count; }
+  }
+  return { leader, split: votes.size > 1 };
+}
+
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[c]));
+}
+
+// Status is always a colored dot (shape differs too) plus a word - never
+// color alone. The word stays in ink, the dot carries the color.
+function chip(kind, word) {
+  const dots = { good: '●', warning: '⚠', critical: '○' };
+  return `<span class="chip"><span class="dot ${kind}">${dots[kind]}</span> ${escapeHtml(word)}</span>`;
+}
+
+function byTarget(a, b) {
+  const numeric = t => t.split(/[.:]/).map(Number);
+  const [av, bv] = [numeric(a.target), numeric(b.target)];
+  for (let i = 0; i < Math.max(av.length, bv.length); i += 1) {
+    const d = (av[i] || 0) - (bv[i] || 0);
+    if (Number.isNaN(d)) return a.target.localeCompare(b.target);
+    if (d !== 0) return d;
+  }
+  return 0;
+}
+
+function tile(label, value, opts = {}) {
+  return `<div class="tile">
+    <div class="label">${escapeHtml(label)}</div>
+    <div class="value ${opts.small ? 'small' : ''}">${value}</div>
+    ${opts.note ? `<div class="note">${opts.note}</div>` : ''}
+  </div>`;
+}
+
+function renderTiles(all, agreed) {
+  const online = all.filter(n => n.ok);
+  const todo = online.reduce((sum, n) => sum + ((n.queue && n.queue.todo) || 0), 0);
+  const pending = online.reduce((sum, n) => sum + ((n.queue && n.queue.pending) || 0), 0);
+
+  document.getElementById('tiles').innerHTML = [
+    tile('Nodes online', `${online.length}<span style="color:var(--muted)"> / ${all.length}</span>`),
+    tile('Leader', escapeHtml(agreed.leader || '—'), {
+      small: true,
+      note: agreed.split ? chip('warning', 'nodes disagree') : '',
+    }),
+    tile('Work waiting', String(todo)),
+    tile('In flight', String(pending)),
+  ].join('');
+}
+
+// The task's human name from the catalog; before the catalog arrives,
+// the module name's last segment does.
+function taskLabel(workItem) {
+  const entry = (catalog || []).find(i => i.work_item === workItem);
+  if (entry) return entry.label;
+  const dot = String(workItem).lastIndexOf('.');
+  return dot < 0 ? String(workItem) : String(workItem).slice(dot + 1).toLowerCase();
+}
+
+// "count: 1229 · largest: 9973"; one nested level renders as
+// "by_node: nano@10.0.0.8 ×3, nano@10.0.0.9 ×2".
+function summaryText(summary) {
+  if (summary === null || typeof summary !== 'object') return String(summary);
+  return Object.entries(summary)
+    .map(([key, value]) => (value !== null && typeof value === 'object')
+      ? `${key}: ${Object.entries(value).map(([k, v]) => `${k} ×${v}`).join(', ')}`
+      : `${key}: ${value}`)
+    .join(' · ');
+}
+
+// Every job any node tracks, newest first. Job ids are per-queue, so
+// jobs from different nodes may share one - the pair is the identity.
+function renderJobs(all) {
+  const rows = [];
+  for (const node of all) {
+    for (const job of node.jobs || []) rows.push({ ...job, node: node.name || node.target });
+  }
+  rows.sort((a, b) => (b.id - a.id) || String(a.node).localeCompare(String(b.node)));
+
+  document.getElementById('jobs-wrap').hidden = rows.length === 0;
+  document.getElementById('jobs').innerHTML = rows.map(job => `<div class="job-row">
+      <span>${escapeHtml(taskLabel(job.work_item))} <span class="muted">#${Number(job.id)}</span></span>
+      <span>${Number(job.done)}/${Number(job.total)}</span>
+      ${job.status === 'done' ? chip('good', 'done') : chip('warning', 'running')}
+      <span class="job-summary">${job.status === 'done' ? escapeHtml(summaryText(job.summary)) : ''}</span>
+    </div>`).join('');
+}
+
+function renderCard(node, agreed) {
+  const name = node.name || node.target;
+  const isLeader = node.ok && agreed.leader !== null && node.name === agreed.leader;
+  const status = node.ok ? chip('good', 'online')
+    : chip('critical', node.everSeen ? 'unreachable' : 'no answer yet');
+
+  const peers = Object.entries((node.view && node.view.peers) || {});
+  const peerRows = peers.map(([peer, peerStatus]) => `<div class="row">
+      <span class="k">${peerStatus === 'online' ? chip('good', '') : chip('critical', '')}</span>
+      <span class="v">${escapeHtml(peer)} <span class="warn">${escapeHtml(peerStatus)}</span></span>
+    </div>`).join('');
+
+  const sees = node.view ? node.view.leader : null;
+  const seesRow = sees === null ? '' : `<div class="row">
+      <span class="k">sees leader</span>
+      <span class="v">${escapeHtml(sees)}${agreed.split && sees !== agreed.leader ? ` ${chip('warning', '')}` : ''}</span>
+    </div>`;
+  const queueRow = node.queue === null ? '' : `<div class="row">
+      <span class="k">queue</span>
+      <span class="v">${node.queue.todo} waiting &middot; ${node.queue.pending} in flight</span>
+    </div>`;
+
+  return `<article class="card ${node.ok ? '' : 'gone'}">
+    <h2><span>${escapeHtml(name)}</span>${isLeader ? '<span class="badge">leader</span>' : ''}</h2>
+    ${status}
+    <div class="body">
+      <div class="rows">
+        ${seesRow}
+        ${queueRow}
+        ${peerRows ? `<div class="peers">${peerRows}</div>` : ''}
+      </div>
+    </div>
+  </article>`;
+}
+
+function render() {
+  const all = [...nodes.values()].sort(byTarget);
+  const agreed = consensus();
+
+  document.getElementById('hint').hidden = true;
+  document.getElementById('tiles').hidden = false;
+  renderTiles(all, agreed);
+  renderJobs(all);
+  document.getElementById('cards').innerHTML = all.map(n => renderCard(n, agreed)).join('');
+  document.getElementById('foot').textContent =
+    `watching ${seed} · every ${POLL_MS / 1000}s · last update ${new Date().toLocaleTimeString()}`;
+}
+
+// Accepts "10.0.0.7", "10.0.0.7:8080", or a pasted "http://10.0.0.7/".
+function normalizeSeed(raw) {
+  const trimmed = raw.trim().replace(/^https?:\/\//, '').replace(/\/.*$/, '');
+  return trimmed || null;
+}
+
+function watch(raw) {
+  const normalized = normalizeSeed(raw);
+  if (!normalized) return;
+  seed = normalized;
+  nodes.clear();
+  catalog = null;
+  document.getElementById('submit-wrap').hidden = true;
+  localStorage.setItem('nano-seed', seed);
+  document.getElementById('seed').value = seed;
+  poll();
+}
+
+document.getElementById('seed-form').addEventListener('submit', event => {
+  event.preventDefault();
+  watch(document.getElementById('seed').value);
+});
+
+setInterval(poll, POLL_MS);
+
+const remembered = new URLSearchParams(location.search).get('seed')
+  || localStorage.getItem('nano-seed');
+if (remembered) watch(remembered);
+</script>
+</body>
+</html>
