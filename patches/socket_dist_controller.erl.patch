@@ -1,0 +1,36 @@
+diff --git a/libs/estdlib/src/socket_dist_controller.erl b/libs/estdlib/src/socket_dist_controller.erl
+index d97f7eb5..35e057f0 100644
+--- a/libs/estdlib/src/socket_dist_controller.erl
++++ b/libs/estdlib/src/socket_dist_controller.erl
+@@ -139,7 +139,11 @@ handle_call({supervisor, Pid}, _From, #state{} = State0) ->
+ handle_call(socket, _From, #state{socket = Socket} = State) ->
+     {reply, Socket, State};
+ handle_call(getstat, _From, #state{received = Received, sent = Sent} = State) ->
+-    {reply, {ok, Received, Sent, 0}, State}.
++    {reply, {ok, Received, Sent, 0}, State};
++handle_call(UnexpectedCall, _From, State) ->
++    % TEMP DIAG: was a crash (no catch-all clause)
++    io:format("sdc: unexpected call: ~p~n", [UnexpectedCall]),
++    {reply, {error, unexpected}, State}.
+ 
+ handle_cast(tick, #state{socket = Socket, sent = Sent} = State) ->
+     socket:send(Socket, <<0:32>>),
+@@ -163,9 +167,15 @@ handle_info(
+     case recv_data_loop(State0) of
+         {ok, State1} -> {noreply, State1};
+         {stop, Reason, State1} -> {stop, Reason, State1}
+-    end.
+-
+-terminate(_Reason, _State) ->
++    end;
++handle_info(UnexpectedInfo, State) ->
++    % TEMP DIAG: was a crash (no catch-all clause; stale selects/aborts land here)
++    io:format("sdc: unexpected info: ~p~n", [UnexpectedInfo]),
++    {noreply, State}.
++
++terminate(Reason, _State) ->
++    % TEMP DIAG: connection controller deaths were invisible
++    io:format("sdc: terminating: ~p~n", [Reason]),
+     ok.
+ 
+ code_change(_OldVsn, State, _Extra) ->

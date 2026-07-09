@@ -1,0 +1,56 @@
+diff --git a/libs/estdlib/src/dist_util.erl b/libs/estdlib/src/dist_util.erl
+index 5767632f..ee130ea0 100644
+--- a/libs/estdlib/src/dist_util.erl
++++ b/libs/estdlib/src/dist_util.erl
+@@ -315,7 +315,19 @@ connection_loop(#connection{kernel = Kernel} = Connection) ->
+             TickTimeout = Connection#connection.tick_timeout,
+             Socket = Connection#connection.socket,
+             GetStat = Connection#connection.get_stat,
+-            case GetStat(Socket) of
++            % TEMP DIAG: find what blocks the data path around ticks
++            T0 = erlang:monotonic_time(millisecond),
++            GetStatResult = GetStat(Socket),
++            GetStatMs = erlang:monotonic_time(millisecond) - T0,
++            case GetStatMs > 50 of
++                true ->
++                    io:format("dist tick: getstat took ~pms (~p)~n", [
++                        GetStatMs, Connection#connection.node
++                    ]);
++                false ->
++                    ok
++            end,
++            case GetStatResult of
+                 {ok, LastRead, _Write, _Pending} when TickTimeout =:= 0 ->
+                     ?shutdown2(
+                         {Connection#connection.node, Connection#connection.socket}, net_tick_timeout
+@@ -437,7 +449,19 @@ mark_pending(#hs_data{kernel_pid = Kernel, this_node = ThisNode, other_node = Ot
+             send_status(<<"alive">>, HSData),
+             reset_timer(HSData#hs_data.timer),
+             case recv_status(HSData) of
+-                <<"true">> -> ok;
++                <<"true">> ->
++                    % We still have a connection registered as alive for
++                    % OtherNode, but the peer says it dropped its side and wants
++                    % a fresh one (typically OtherNode's socket dropped and came
++                    % back while our net tick had not yet timed out the old
++                    % connection). Tear our stale side down now, before
++                    % connection/2 calls erlang:setnode/3: setnode/3 raises
++                    % badarg while a live connection to OtherNode with the same
++                    % creation still exists. See
++                    % net_kernel:disconnect_old_connection/2 and the
++                    % dist_connection_down handler in dist_nifs.c.
++                    net_kernel:disconnect_old_connection(Kernel, OtherNode),
++                    ok;
+                 <<"false">> -> ?shutdown(OtherNode);
+                 Other -> ?shutdown({OtherNode, {unexpected, Other}})
+             end
+@@ -525,6 +549,9 @@ check_challenge(Cookie, Challenge, Digest, HSData) ->
+         true ->
+             ok;
+         false ->
++            % almost always a cookie mismatch; print ours to make a
++            % net_kernel restart (which resets the cookie) visible
++            io:format("dist_util: challenge check failed, our cookie: ~p~n", [Cookie]),
+             ?shutdown({HSData#hs_data.other_node, invalid_challenge})
+     end.
+ 

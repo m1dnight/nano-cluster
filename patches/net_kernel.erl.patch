@@ -1,0 +1,157 @@
+diff --git a/libs/estdlib/src/net_kernel.erl b/libs/estdlib/src/net_kernel.erl
+index 0a4033ad..0b9b5033 100644
+--- a/libs/estdlib/src/net_kernel.erl
++++ b/libs/estdlib/src/net_kernel.erl
+@@ -47,6 +47,7 @@
+ -export([
+     mark_pending/4,
+     mark_nodeup/4,
++    disconnect_old_connection/2,
+     get_cookie/0,
+     get_cookie/1,
+     set_cookie/1,
+@@ -149,6 +150,26 @@ mark_pending(Kernel, ThisNode, OtherNode, ConnPid) ->
+ mark_nodeup(Kernel, OtherNode, OtherAddress, ConnPid) ->
+     gen_server:call(Kernel, {mark_nodeup, OtherNode, OtherAddress, ConnPid}).
+ 
++%% @hidden
++%% @doc Tear down the connection currently registered as alive for `Node'.
++%%
++%% Called by `dist_util' when an incoming handshake supersedes an existing
++%% connection: our side answered `<<"alive">>' and the peer answered
++%% `<<"true">>', meaning it has dropped the old connection and wants a fresh
++%% one. Our side must drop its stale connection *before* the new handshake
++%% reaches `erlang:setnode/3', otherwise `setnode/3' raises `badarg' because a
++%% live connection to `Node' with the same creation still exists (the peer's VM
++%% never restarted, only its socket dropped, so its node creation is unchanged).
++%%
++%% Killing the old dist controller process makes its resource-down handler
++%% clear the C-side dist entry (see `dist_connection_down' in `dist_nifs.c'), so
++%% the superseding `setnode/3' can reuse it. The handshake then runs a full
++%% challenge round-trip before `setnode/3', which is ample time for the local
++%% controller to die and fire that handler.
++-spec disconnect_old_connection(pid(), node()) -> ok.
++disconnect_old_connection(Kernel, Node) ->
++    gen_server:call(Kernel, {disconnect_old_connection, Node}).
++
+ %% @hidden
+ -spec get_cookie() -> binary().
+ get_cookie() ->
+@@ -257,9 +278,34 @@ handle_call(
+     _From,
+     #state{connections = Connections0} = State0
+ ) ->
+-    Connections1 = maps:update(OtherNode, {alive, ConnPid, OtherAddress}, Connections0),
++    % maps:put, not maps:update: when this handshake superseded an old alive
++    % connection (see {disconnect_old_connection, _} below), the old
++    % connection's 'EXIT' may have already removed the entry from the map, and
++    % maps:update/3 would then crash with badkey. put/3 installs the new alive
++    % entry whether or not the old one is still present.
++    Connections1 = maps:put(OtherNode, {alive, ConnPid, OtherAddress}, Connections0),
+     State1 = State0#state{connections = Connections1},
+     {reply, {ok, ?NET_TICK_INTENSITY}, State1};
++handle_call(
++    {disconnect_old_connection, Node}, _From, #state{connections = Connections} = State
++) ->
++    case maps:find(Node, Connections) of
++        {ok, {alive, OldConnPid, _Address}} ->
++            % Ask the old dist controller to shut down. connection_loop/1 in
++            % dist_util handles {Kernel, disconnect} by closing the socket and
++            % exiting; its death fires the resource-down handler that clears the
++            % C-side dist entry, unblocking the superseding setnode/3.
++            %
++            % We deliberately leave the map entry in place: the superseding
++            % handshake's mark_nodeup overwrites it (and now tolerates the entry
++            % having been removed first by the old connection's 'EXIT').
++            OldConnPid ! {self(), disconnect},
++            {reply, ok, State};
++        _ ->
++            % No alive connection to supersede (already gone, or only pending):
++            % nothing to tear down, the setnode/3 will not collide.
++            {reply, ok, State}
++    end;
+ handle_call(get_cookie, _From, #state{cookie = Cookie} = State) ->
+     {reply, Cookie, State};
+ handle_call({get_cookie, Node}, _From, #state{cookie = Cookie, cookies = Cookies} = State) ->
+@@ -293,11 +339,15 @@ handle_info(
+     AcceptPid ! {self(), controller, Pid},
+     {noreply, State};
+ handle_info(tick, #state{connections = Connections} = State) ->
++    % The fold accumulator must stay ok: with two or more alive
++    % connections, letting the send expression's value ({self(), tick})
++    % leak into the accumulator crashed net_kernel on every tick.
+     maps:fold(
+         fun(_Node, Status, ok) ->
+             case Status of
+                 {alive, ConnPid, _Address} ->
+-                    ConnPid ! {self(), tick};
++                    ConnPid ! {self(), tick},
++                    ok;
+                 _ ->
+                     ok
+             end
+@@ -317,7 +367,9 @@ handle_info(
+ ) ->
+     NewAcceptPid = ProtoDist:accept(Listen),
+     {noreply, State#state{accept_pid = NewAcceptPid}};
+-handle_info({'EXIT', Pid, _Reason}, #state{connections = Connections} = State) ->
++handle_info({'EXIT', Pid, Reason}, #state{connections = Connections} = State) ->
++    % TEMP DIAG: connection process deaths were silent
++    io:format("net_kernel: ~p exited: ~p~n", [Pid, Reason]),
+     NewConnections = maps:filter(
+         fun(_Node, Status) ->
+             case Status of
+@@ -328,7 +380,18 @@ handle_info({'EXIT', Pid, _Reason}, #state{connections = Connections} = State) -
+         end,
+         Connections
+     ),
++    % Dropping an entry drops its DHandle, but the C-side connection object
++    % lives until that reference is actually collected - and while it lives,
++    % every send to the node piles up in its pending queue and no new
++    % {connect, ...} is emitted. Collect promptly so the next send retries.
++    case maps:size(NewConnections) =/= maps:size(Connections) of
++        true -> self() ! collect_dropped_connections;
++        false -> ok
++    end,
+     {noreply, State#state{connections = NewConnections}};
++handle_info(collect_dropped_connections, State) ->
++    erlang:garbage_collect(),
++    {noreply, State};
+ handle_info(
+     {connect, OtherNode, DHandle},
+     #state{connections = Connections, node = MyNode, longnames = Longnames, proto_dist = ProtoDist} =
+@@ -338,17 +401,30 @@ handle_info(
+     NewConnections =
+         case maps:find(OtherNode, Connections) of
+             error ->
+-                ProtoDist:setup(OtherNode, normal, MyNode, Longnames, ?SETUPTIME),
+-                maps:put(OtherNode, {pending, undefined, DHandle}, Connections);
++                % Keep the setup pid: it is linked, so if the handshake fails
++                % the 'EXIT' clause above clears this entry and a later send
++                % can trigger a fresh connection attempt. With undefined here,
++                % one failed setup left the entry (and the C-side object)
++                % behind forever, black-holing the node until reboot.
++                SetupPid = ProtoDist:setup(OtherNode, normal, MyNode, Longnames, ?SETUPTIME),
++                maps:put(OtherNode, {pending, SetupPid, DHandle}, Connections);
+             {ok, {pending, ConnPid, _}} ->
+                 maps:put(OtherNode, {pending, ConnPid, DHandle}, Connections);
+             {ok, {alive, _ConnPid, _Address}} ->
+                 Connections
+         end,
+-    {noreply, State#state{connections = NewConnections}}.
++    {noreply, State#state{connections = NewConnections}};
++handle_info(UnexpectedMsg, State) ->
++    % An unmatched message must not crash net_kernel: the supervisor
++    % restarts it with a freshly generated cookie, silently breaking every
++    % subsequent handshake until set_cookie is called again.
++    io:format("net_kernel: unexpected message: ~p~n", [UnexpectedMsg]),
++    {noreply, State}.
+ 
+ %% @hidden
+-terminate(_Reason, #state{listen = Listen, proto_dist = ProtoDist}) ->
++terminate(Reason, #state{listen = Listen, proto_dist = ProtoDist}) ->
++    % A restart mints a new random cookie, so make the death observable.
++    io:format("net_kernel terminating: ~p~n", [Reason]),
+     ProtoDist:close(Listen),
+     ok.
+ 

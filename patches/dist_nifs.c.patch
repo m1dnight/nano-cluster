@@ -1,0 +1,41 @@
+diff --git a/src/libAtomVM/dist_nifs.c b/src/libAtomVM/dist_nifs.c
+index dff76b6b..4565c23e 100644
+--- a/src/libAtomVM/dist_nifs.c
++++ b/src/libAtomVM/dist_nifs.c
+@@ -250,11 +250,34 @@ static void dist_enqueue_unlink_id_or_ack_message(int operation_id, uint64_t unl
+ static void dist_connection_down(ErlNifEnv *caller_env, void *obj, ErlNifPid *pid, ErlNifMonitor *mon)
+ {
+     UNUSED(pid);
+-    UNUSED(mon);
+ 
+     struct DistConnection *conn_obj = (struct DistConnection *) obj;
+ 
+-    if (enif_compare_monitors(&conn_obj->connection_process_monitor, mon) != 0) {
++    if (enif_compare_monitors(&conn_obj->connection_process_monitor, mon) == 0) {
++        // The dist controller process that owned this connection has died
++        // (socket closed, net tick timeout, node disconnected, ...).
++        //
++        // The DistConnection struct is NOT freed here: it lives until
++        // net_kernel drops the DHandle it holds and the resource is garbage
++        // collected (see dist_connection_dtor). Until then this entry still
++        // names its now-dead owner process. If we leave connection_process_id
++        // pointing at that dead pid, a reconnection to the same node hits the
++        // "already known, same creation" guard in nif_erlang_setnode_3 below
++        // and raises badarg, killing the new handshake. (Same creation because
++        // the peer's VM never restarted - only its socket dropped, e.g. a WiFi
++        // blip - so its node_creation is unchanged.)
++        //
++        // Clearing it to INVALID_PROCESS_ID lets the next setnode/3 for this
++        // node take the entry over through its reuse branch instead.
++        //
++        // Locked like the read side in nif_erlang_setnode_3: this .down
++        // handler runs from the dying process' terminate path with the
++        // processes table already unlocked (context.c) and grabs no other
++        // global lock, so taking dist_connections here cannot deadlock.
++        synclist_wrlock(&caller_env->global->dist_connections);
++        conn_obj->connection_process_id = INVALID_PROCESS_ID;
++        synclist_unlock(&caller_env->global->dist_connections);
++    } else {
+         struct ListHead *remote_monitors = synclist_wrlock(&conn_obj->remote_monitors);
+         struct ListHead *item;
+         LIST_FOR_EACH (item, remote_monitors) {
