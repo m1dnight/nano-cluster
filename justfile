@@ -67,7 +67,7 @@ build-atomvm-host:
 # Run the app on this machine under AtomVM generic_unix, to catch functions the
 # device image doesn't have before flashing. WiFi is skipped (Wifi.connect returns
 # loopback on generic_unix), everything else boots for real: distribution, UDP
-# discovery, work queue, web API on port 80. The boot lib is cut down to the same
+# discovery, work queue, web API on port 8123. The boot lib is cut down to the same
 # 512KB the boot.avm partition holds - whole modules only, then a zeroed section
 # header, because the VM scans the pack until a zero header and would otherwise
 # run off the end of the file (the flashed board stops at the partition edge).
