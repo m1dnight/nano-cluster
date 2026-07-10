@@ -306,7 +306,7 @@
 <script>
 'use strict';
 
-const POLL_MS = 2000;
+const POLL_MS = 10000;
 const FETCH_TIMEOUT_MS = 1500;
 // a node whose leader is unreachable stalls ~2s per push before replying
 const SUBMIT_TIMEOUT_MS = 6000;
@@ -346,21 +346,23 @@ function nodeEntry(target) {
 
 // Each node shares a tiny socket budget - about ten file descriptors, split
 // across its HTTP API, UDP discovery and every Erlang distribution link - so a
-// couple of overlapping requests can exhaust it and make the node's accept()
-// fail (errno 23, ENFILE). To stay well clear of that, EVERY request this page
-// makes - to any node, poll or submit - is funneled through this queue, so at
-// most one HTTP request is ever in flight cluster-wide. Slower, on purpose.
-let requestChain = Promise.resolve();
-function serialize(task) {
-  const run = requestChain.then(task, task);
-  // Keep the chain alive whichever way this task settled; the caller still
-  // gets the real result (or error) through `run`.
-  requestChain = run.then(() => {}, () => {});
+// couple of overlapping requests to ONE node can exhaust it and make that
+// node's accept() fail (errno 23, ENFILE). So requests are serialized per node:
+// at most one HTTP request in flight per target. Different nodes have separate
+// socket pools, so they are hit concurrently - one slow node never holds up the
+// others. Keyed by target, one promise chain each.
+const requestChains = new Map();
+function serialize(target, task) {
+  const prev = requestChains.get(target) || Promise.resolve();
+  const run = prev.then(task, task);
+  // Keep this node's chain alive whichever way the task settled; the caller
+  // still gets the real result (or error) through `run`.
+  requestChains.set(target, run.then(() => {}, () => {}));
   return run;
 }
 
 function getJson(target, path) {
-  return serialize(async () => {
+  return serialize(target, async () => {
     const control = new AbortController();
     // Start the timeout now that the request is actually running, not back
     // when it was queued behind other requests.
@@ -469,7 +471,7 @@ function submitTarget() {
 }
 
 function postJson(target, path, payload) {
-  return serialize(async () => {
+  return serialize(target, async () => {
     const control = new AbortController();
     const timer = setTimeout(() => control.abort(), SUBMIT_TIMEOUT_MS);
     try {
