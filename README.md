@@ -11,11 +11,27 @@ implementation of finding the amount of primes in a given range. Each worker
 node will pick up tasks from the leader's queue and compute them, and report
 back the result.
 
-
-
-
 Dashboard ![The Nano Cluster overview dashboard: a header showing 4/5 nodes online with nano@192.168.4.61 as leader and no work waiting or in flight, a form for submitting a prime-finding job over a range, three completed prime jobs each reporting 9592 primes, and per-node cards listing each node's status, queue, and discovered peers.](img/dashboard.png)
 
+## Build
+
+To run it, I've added a Justfile to do the heavy lifting. Since I've been making some changes to AtomVM itself (see `patches/`), I cloned AtomVM in the root dir of this project.
+
+```shell
+# clone the repo
+git clone https://github.com/m1dnight/nano-cluster
+cd nano-cluster
+
+# pull in atomvm
+git clone https://github.com/m1dnight/nano-cluster
+
+# Assuming you have an ESP32 connected, and your wifi is called `IoT` and password `2cool4school`
+just build-atomvm
+just flash
+just flash-app
+just set-wifi "IoT" "2cool4school"
+just update
+```
 ## Learnings
 
 The ESP32s have very little memory and do not deal with multiple socket
